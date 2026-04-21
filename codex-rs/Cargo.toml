@@ -42,6 +42,7 @@ members = [
     "keyring-store",
     "file-search",
     "linux-sandbox",
+    "lemonade",
     "lmstudio",
     "login",
     "codex-mcp",
@@ -150,6 +151,7 @@ codex-file-search = { path = "file-search" }
 codex-git-utils = { path = "git-utils" }
 codex-hooks = { path = "hooks" }
 codex-keyring-store = { path = "keyring-store" }
+codex-lemonade = { path = "lemonade" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-lmstudio = { path = "lmstudio" }
 codex-login = { path = "login" }

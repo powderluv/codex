@@ -51,6 +51,7 @@ use codex_config::types::TuiNotificationSettings;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
+use codex_model_provider_info::LEMONADE_OSS_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
@@ -6013,11 +6014,18 @@ fn test_set_default_oss_provider() -> std::io::Result<()> {
     assert!(content.contains("oss_provider = \"lmstudio\""));
     assert!(content.contains("model = \"gpt-4\""));
 
+    // Test accepting Lemonade as a built-in OSS provider.
+    set_default_oss_provider(codex_home, LEMONADE_OSS_PROVIDER_ID)?;
+    let content = std::fs::read_to_string(&config_path)?;
+    assert!(content.contains("oss_provider = \"lemonade\""));
+    assert!(content.contains("model = \"gpt-4\""));
+
     // Test overwriting existing oss_provider
     set_default_oss_provider(codex_home, OLLAMA_OSS_PROVIDER_ID)?;
     let content = std::fs::read_to_string(&config_path)?;
     assert!(content.contains("oss_provider = \"ollama\""));
     assert!(!content.contains("oss_provider = \"lmstudio\""));
+    assert!(!content.contains("oss_provider = \"lemonade\""));
 
     // Test invalid provider
     let result = set_default_oss_provider(codex_home, "invalid_provider");

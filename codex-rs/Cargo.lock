@@ -2776,6 +2776,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-lemonade"
+version = "0.0.0"
+dependencies = [
+ "codex-core",
+ "codex-model-provider-info",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "which 8.0.0",
+ "wiremock",
+]
+
+[[package]]
 name = "codex-linux-sandbox"
 version = "0.0.0"
 dependencies = [
@@ -3631,6 +3645,7 @@ name = "codex-utils-oss"
 version = "0.0.0"
 dependencies = [
  "codex-core",
+ "codex-lemonade",
  "codex-lmstudio",
  "codex-model-provider-info",
  "codex-ollama",

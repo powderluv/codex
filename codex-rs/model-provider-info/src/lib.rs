@@ -393,9 +393,14 @@ impl ModelProviderInfo {
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;
 pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
+pub const DEFAULT_LEMONADE_PORT: u16 = 13305;
+pub const DEFAULT_LMSTUDIO_BASE_URL: &str = "http://localhost:1234/v1";
+pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
+pub const DEFAULT_LEMONADE_BASE_URL: &str = "http://localhost:13305/api/v1";
 
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
+pub const LEMONADE_OSS_PROVIDER_ID: &str = "lemonade";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers(
@@ -414,11 +419,15 @@ pub fn built_in_model_providers(
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (
             OLLAMA_OSS_PROVIDER_ID,
-            create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Responses),
+            create_oss_provider(DEFAULT_OLLAMA_PORT, "v1", WireApi::Responses),
         ),
         (
             LMSTUDIO_OSS_PROVIDER_ID,
-            create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
+            create_oss_provider(DEFAULT_LMSTUDIO_PORT, "v1", WireApi::Responses),
+        ),
+        (
+            LEMONADE_OSS_PROVIDER_ID,
+            create_oss_provider(DEFAULT_LEMONADE_PORT, "api/v1", WireApi::Responses),
         ),
     ]
     .into_iter()
@@ -464,11 +473,16 @@ pub fn merge_configured_model_providers(
     Ok(model_providers)
 }
 
-pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> ModelProviderInfo {
+pub fn create_oss_provider(
+    default_provider_port: u16,
+    default_base_path: &str,
+    wire_api: WireApi,
+) -> ModelProviderInfo {
     // These CODEX_OSS_ environment variables are experimental: we may
     // switch to reading values from config.toml instead.
+    let default_base_path = default_base_path.trim_start_matches('/');
     let default_codex_oss_base_url = format!(
-        "http://localhost:{codex_oss_port}/v1",
+        "http://localhost:{codex_oss_port}/{default_base_path}",
         codex_oss_port = std::env::var("CODEX_OSS_PORT")
             .ok()
             .filter(|value| !value.trim().is_empty())

@@ -2951,7 +2951,7 @@
       "type": "string"
     },
     "oss_provider": {
-      "description": "Preferred OSS provider for local models, e.g. \"lmstudio\" or \"ollama\".",
+      "description": "Preferred OSS provider for local models, e.g. \"lmstudio\", \"ollama\", or \"lemonade\".",
       "type": "string"
     },
     "otel": {

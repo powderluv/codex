@@ -281,6 +281,18 @@ fn test_built_in_model_providers_include_amazon_bedrock() {
 }
 
 #[test]
+fn test_built_in_model_providers_include_lemonade() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+
+    assert_eq!(
+        providers
+            .get(LEMONADE_OSS_PROVIDER_ID)
+            .and_then(|provider| provider.base_url.as_deref()),
+        Some(DEFAULT_LEMONADE_BASE_URL)
+    );
+}
+
+#[test]
 fn test_merge_configured_model_providers_adds_custom_provider() {
     let custom_provider = ModelProviderInfo {
         name: "Custom".to_string(),

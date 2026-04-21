@@ -2,8 +2,10 @@ use std::io;
 use std::sync::LazyLock;
 
 use crate::legacy_core::config::set_default_oss_provider;
-use codex_model_provider_info::DEFAULT_LMSTUDIO_PORT;
-use codex_model_provider_info::DEFAULT_OLLAMA_PORT;
+use codex_model_provider_info::DEFAULT_LEMONADE_BASE_URL;
+use codex_model_provider_info::DEFAULT_LMSTUDIO_BASE_URL;
+use codex_model_provider_info::DEFAULT_OLLAMA_BASE_URL;
+use codex_model_provider_info::LEMONADE_OSS_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use crossterm::event::Event;
@@ -74,6 +76,12 @@ static OSS_SELECT_OPTIONS: LazyLock<Vec<SelectOption>> = LazyLock::new(|| {
             key: KeyCode::Char('o'),
             provider_id: OLLAMA_OSS_PROVIDER_ID,
         },
+        SelectOption {
+            label: Line::from(vec!["Lemonad".into(), "e".underlined()]),
+            description: "Local Lemonade server (OpenAI-compatible API, default port 13305)",
+            key: KeyCode::Char('e'),
+            provider_id: LEMONADE_OSS_PROVIDER_ID,
+        },
     ]
 });
 
@@ -92,7 +100,11 @@ pub struct OssSelectionWidget<'a> {
 }
 
 impl OssSelectionWidget<'_> {
-    fn new(lmstudio_status: ProviderStatus, ollama_status: ProviderStatus) -> io::Result<Self> {
+    fn new(
+        lmstudio_status: ProviderStatus,
+        ollama_status: ProviderStatus,
+        lemonade_status: ProviderStatus,
+    ) -> io::Result<Self> {
         let providers = vec![
             ProviderOption {
                 name: "LM Studio".to_string(),
@@ -105,6 +117,10 @@ impl OssSelectionWidget<'_> {
             ProviderOption {
                 name: "Ollama (Chat)".to_string(),
                 status: ollama_status,
+            },
+            ProviderOption {
+                name: "Lemonade".to_string(),
+                status: lemonade_status,
             },
         ];
 
@@ -291,23 +307,23 @@ pub async fn select_oss_provider(codex_home: &std::path::Path) -> io::Result<Str
     // Check provider statuses first
     let lmstudio_status = check_lmstudio_status().await;
     let ollama_status = check_ollama_status().await;
+    let lemonade_status = check_lemonade_status().await;
 
-    // Autoselect if only one is running
-    match (&lmstudio_status, &ollama_status) {
-        (ProviderStatus::Running, ProviderStatus::NotRunning) => {
-            let provider = LMSTUDIO_OSS_PROVIDER_ID.to_string();
-            return Ok(provider);
-        }
-        (ProviderStatus::NotRunning, ProviderStatus::Running) => {
-            let provider = OLLAMA_OSS_PROVIDER_ID.to_string();
-            return Ok(provider);
-        }
-        _ => {
-            // Both running or both not running - show UI
-        }
+    let running_providers = [
+        (&lmstudio_status, LMSTUDIO_OSS_PROVIDER_ID),
+        (&ollama_status, OLLAMA_OSS_PROVIDER_ID),
+        (&lemonade_status, LEMONADE_OSS_PROVIDER_ID),
+    ]
+    .into_iter()
+    .filter_map(|(status, provider_id)| {
+        matches!(status, ProviderStatus::Running).then_some(provider_id)
+    })
+    .collect::<Vec<_>>();
+    if let [provider] = running_providers.as_slice() {
+        return Ok((*provider).to_string());
     }
 
-    let mut widget = OssSelectionWidget::new(lmstudio_status, ollama_status)?;
+    let mut widget = OssSelectionWidget::new(lmstudio_status, ollama_status, lemonade_status)?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -343,7 +359,7 @@ pub async fn select_oss_provider(codex_home: &std::path::Path) -> io::Result<Str
 }
 
 async fn check_lmstudio_status() -> ProviderStatus {
-    match check_port_status(DEFAULT_LMSTUDIO_PORT).await {
+    match check_provider_status(DEFAULT_LMSTUDIO_BASE_URL).await {
         Ok(true) => ProviderStatus::Running,
         Ok(false) => ProviderStatus::NotRunning,
         Err(_) => ProviderStatus::Unknown,
@@ -351,20 +367,28 @@ async fn check_lmstudio_status() -> ProviderStatus {
 }
 
 async fn check_ollama_status() -> ProviderStatus {
-    match check_port_status(DEFAULT_OLLAMA_PORT).await {
+    match check_provider_status(DEFAULT_OLLAMA_BASE_URL).await {
         Ok(true) => ProviderStatus::Running,
         Ok(false) => ProviderStatus::NotRunning,
         Err(_) => ProviderStatus::Unknown,
     }
 }
 
-async fn check_port_status(port: u16) -> io::Result<bool> {
+async fn check_lemonade_status() -> ProviderStatus {
+    match check_provider_status(DEFAULT_LEMONADE_BASE_URL).await {
+        Ok(true) => ProviderStatus::Running,
+        Ok(false) => ProviderStatus::NotRunning,
+        Err(_) => ProviderStatus::Unknown,
+    }
+}
+
+async fn check_provider_status(base_url: &str) -> io::Result<bool> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
         .map_err(io::Error::other)?;
 
-    let url = format!("http://localhost:{port}");
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
 
     match client.get(&url).send().await {
         Ok(response) => Ok(response.status().is_success()),
