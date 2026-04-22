@@ -217,6 +217,33 @@ pub fn auth_provider_from_agent_task(
     })
 }
 
+/// Builds background/control-plane auth from the concrete auth snapshot.
+///
+/// ChatGPT callers that have opted into Agent Identity should first resolve the
+/// effective [`AgentIdentityAuth`] and call
+/// [`background_auth_provider_from_agent_identity_auth`].
+pub async fn background_auth_provider_from_auth(
+    auth: &CodexAuth,
+    chatgpt_base_url: Option<String>,
+) -> std::io::Result<SharedAuthProvider> {
+    match auth {
+        CodexAuth::AgentIdentity(auth) => {
+            background_auth_provider_from_agent_identity_auth(auth.clone(), chatgpt_base_url).await
+        }
+        CodexAuth::ApiKey(_) | CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_) => {
+            Ok(auth_provider_from_auth(auth))
+        }
+    }
+}
+
+pub async fn background_auth_provider_from_agent_identity_auth(
+    auth: AgentIdentityAuth,
+    chatgpt_base_url: Option<String>,
+) -> std::io::Result<SharedAuthProvider> {
+    let task = auth.registered_background_task(chatgpt_base_url).await?;
+    Ok(auth_provider_from_agent_task(auth, task))
+}
+
 #[cfg(test)]
 mod tests {
     use codex_agent_identity::AgentRuntimeId;

@@ -29,6 +29,7 @@ pub struct AgentIdentityAuth {
 enum AgentTaskCacheKey {
     Process,
     Thread(AgentTaskExternalRef),
+    Background,
 }
 
 impl Clone for AgentIdentityAuth {
@@ -79,6 +80,20 @@ impl AgentIdentityAuth {
             )
             .await?;
         Ok(self.registered_task(task_id, AgentTaskKind::Thread))
+    }
+
+    pub async fn registered_background_task(
+        &self,
+        chatgpt_base_url: Option<String>,
+    ) -> std::io::Result<RegisteredAgentTask> {
+        let task_id = self
+            .task_id_for_key(
+                AgentTaskCacheKey::Background,
+                chatgpt_base_url,
+                /*external_ref*/ None,
+            )
+            .await?;
+        Ok(self.registered_task(task_id, AgentTaskKind::Background))
     }
 
     pub async fn register_task(&self, chatgpt_base_url: Option<String>) -> std::io::Result<String> {
@@ -309,6 +324,88 @@ mod tests {
 
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
         assert_eq!(task.task_id.as_str(), "task-thread-1");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registered_background_task_registers_once_without_external_ref() -> anyhow::Result<()>
+    {
+        let auth = agent_identity_auth();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/agent-runtime-1/task/register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "task_id": "task-background-1",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let first = auth.registered_background_task(Some(server.uri())).await?;
+        let second = auth.registered_background_task(Some(server.uri())).await?;
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            RegisteredAgentTask::new(
+                AgentRuntimeId::new("agent-runtime-1"),
+                AgentTaskId::new("task-background-1"),
+                AgentTaskKind::Background,
+            )
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("failed to fetch task registration request");
+        let request_body = requests[0]
+            .body_json::<serde_json::Value>()
+            .expect("task registration request should be JSON");
+        assert_eq!(request_body.get("external_task_ref"), None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_background_registration_does_not_poison_thread_task_registration()
+    -> anyhow::Result<()> {
+        let auth = agent_identity_auth();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/agent-runtime-1/task/register"))
+            .respond_with(|request: &wiremock::Request| {
+                let body = request
+                    .body_json::<serde_json::Value>()
+                    .expect("task registration request should be JSON");
+                if body
+                    .get("external_task_ref")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("thread-1")
+                {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "task_id": "task-thread-1",
+                    }))
+                } else {
+                    ResponseTemplate::new(500)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        auth.registered_background_task(Some(server.uri()))
+            .await
+            .expect_err("background registration should fail");
+        let thread_task = auth
+            .registered_thread_task(AgentTaskExternalRef::new("thread-1"), Some(server.uri()))
+            .await?;
+
+        assert_eq!(
+            thread_task,
+            RegisteredAgentTask::new(
+                AgentRuntimeId::new("agent-runtime-1"),
+                AgentTaskId::new("task-thread-1"),
+                AgentTaskKind::Thread,
+            )
+        );
         Ok(())
     }
 
