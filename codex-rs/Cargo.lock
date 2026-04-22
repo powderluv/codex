@@ -2115,6 +2115,7 @@ dependencies = [
  "codex-responses-api-proxy",
  "codex-rmcp-client",
  "codex-sandboxing",
+ "codex-shell-command",
  "codex-state",
  "codex-stdio-to-uds",
  "codex-terminal-detection",
