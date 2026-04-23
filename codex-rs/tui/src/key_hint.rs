@@ -33,14 +33,28 @@ impl KeyBinding {
     }
 
     pub fn is_press(&self, event: KeyEvent) -> bool {
-        self.key == event.code
-            && self.modifiers == event.modifiers
+        normalize_shifted_ascii_char(self.key, self.modifiers)
+            == normalize_shifted_ascii_char(event.code, event.modifiers)
             && (event.kind == KeyEventKind::Press || event.kind == KeyEventKind::Repeat)
     }
 
     pub(crate) const fn parts(&self) -> (KeyCode, KeyModifiers) {
         (self.key, self.modifiers)
     }
+}
+
+fn normalize_shifted_ascii_char(
+    key: KeyCode,
+    mut modifiers: KeyModifiers,
+) -> (KeyCode, KeyModifiers) {
+    let KeyCode::Char(ch) = key else {
+        return (key, modifiers);
+    };
+    if ch.is_ascii_uppercase() {
+        modifiers.insert(KeyModifiers::SHIFT);
+        return (KeyCode::Char(ch.to_ascii_lowercase()), modifiers);
+    }
+    (key, modifiers)
 }
 
 /// Matching helpers for one action's keybinding set.
@@ -168,6 +182,14 @@ mod tests {
         assert!(bindings.is_pressed(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
         assert!(bindings.is_pressed(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
         assert!(!bindings.is_pressed(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn shifted_letter_binding_matches_uppercase_char_events() {
+        let binding = shift(KeyCode::Char('a'));
+
+        assert!(binding.is_press(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE)));
+        assert!(binding.is_press(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT)));
     }
 
     #[test]
