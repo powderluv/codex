@@ -1,5 +1,5 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/popups_and_settings.rs
 expression: popup
 ---
   Select Model and Effort
@@ -15,4 +15,4 @@ expression: popup
   6. gpt-5.1-codex-mini       Optimized for codex. Cheaper, faster, but less
                               capable.
 
-  Press enter to select reasoning effort, or esc to dismiss.
+  Press enter to confirm or esc to go back
