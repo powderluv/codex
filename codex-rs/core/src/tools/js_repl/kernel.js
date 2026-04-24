@@ -1214,6 +1214,7 @@ function encodeByteImage(bytes, mimeType, detail) {
   if (typeof mimeType !== "string" || !mimeType) {
     throw new Error("codex.emitImage expected a non-empty mimeType");
   }
+  validateEmitImageMimeType(mimeType);
   const image_url = `data:${mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
   return { image_url, detail };
 }
@@ -1240,7 +1241,35 @@ function normalizeEmitImageUrl(value) {
   if (!/^data:/i.test(value)) {
     throw new Error("codex.emitImage only accepts data URLs");
   }
+  const mimeType = parseDataUrlMimeType(value);
+  validateEmitImageMimeType(mimeType);
   return value;
+}
+
+function parseDataUrlMimeType(dataUrl) {
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex < 0) {
+    throw new Error("codex.emitImage expected a valid image data URL");
+  }
+  const mediaType = dataUrl.slice(5, commaIndex).split(";")[0];
+  if (!mediaType) {
+    throw new Error("codex.emitImage expected image data URL to include a MIME type");
+  }
+  return mediaType;
+}
+
+function validateEmitImageMimeType(mimeType) {
+  const normalized = typeof mimeType === "string" ? mimeType.toLowerCase() : "";
+  if (
+    normalized !== "image/png" &&
+    normalized !== "image/jpeg" &&
+    normalized !== "image/webp" &&
+    normalized !== "image/gif"
+  ) {
+    throw new Error(
+      "codex.emitImage only supports image/png, image/jpeg, image/webp, or image/gif",
+    );
+  }
 }
 
 function parseInputImageItem(value) {
