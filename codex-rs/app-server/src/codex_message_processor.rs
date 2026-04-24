@@ -352,7 +352,7 @@ use codex_state::ThreadMetadata;
 use codex_state::ThreadMetadataBuilder;
 use codex_state::log_db::LogDbLayer;
 use codex_thread_store::ArchiveThreadParams as StoreArchiveThreadParams;
-#[cfg(any(test, debug_assertions))]
+#[cfg(debug_assertions)]
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::ListThreadsParams as StoreListThreadsParams;
 use codex_thread_store::LocalThreadStore;
@@ -666,7 +666,7 @@ fn configured_thread_store(config: &Config) -> Arc<dyn ThreadStore> {
             codex_rollout::RolloutConfig::from_view(config),
         )),
         ThreadStoreConfig::Remote { endpoint } => Arc::new(RemoteThreadStore::new(endpoint)),
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(debug_assertions)]
         ThreadStoreConfig::InMemory { id } => InMemoryThreadStore::for_id(id),
     }
 }
