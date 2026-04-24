@@ -234,6 +234,7 @@ use codex_core::clear_memory_roots_contents;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::NetworkProxyAuditMetadata;
+use codex_core::config::ThreadStoreConfig;
 use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config_loader::CloudRequirementsLoadError;
@@ -351,6 +352,8 @@ use codex_state::ThreadMetadata;
 use codex_state::ThreadMetadataBuilder;
 use codex_state::log_db::LogDbLayer;
 use codex_thread_store::ArchiveThreadParams as StoreArchiveThreadParams;
+#[cfg(any(test, debug_assertions))]
+use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::ListThreadsParams as StoreListThreadsParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ReadThreadParams as StoreReadThreadParams;
@@ -658,17 +661,13 @@ pub(crate) struct CodexMessageProcessorArgs {
 }
 
 fn configured_thread_store(config: &Config) -> Arc<dyn ThreadStore> {
-    match config.experimental_thread_store_endpoint.as_deref() {
-        Some(endpoint) => {
-            #[cfg(any(test, debug_assertions))]
-            if let Some(store) = codex_thread_store::test_thread_store(endpoint) {
-                return store;
-            }
-            Arc::new(RemoteThreadStore::new(endpoint))
-        }
-        None => Arc::new(LocalThreadStore::new(
+    match &config.experimental_thread_store {
+        ThreadStoreConfig::Local => Arc::new(LocalThreadStore::new(
             codex_rollout::RolloutConfig::from_view(config),
         )),
+        ThreadStoreConfig::Remote { endpoint } => Arc::new(RemoteThreadStore::new(endpoint)),
+        #[cfg(any(test, debug_assertions))]
+        ThreadStoreConfig::InMemory { id } => InMemoryThreadStore::for_id(id),
     }
 }
 
