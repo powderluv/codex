@@ -526,6 +526,7 @@ impl AppServerSession {
         approval_policy: AskForApproval,
         approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
         sandbox_policy: SandboxPolicy,
+        permission_profile: Option<PermissionProfile>,
         model: String,
         effort: Option<codex_protocol::openai_models::ReasoningEffort>,
         summary: Option<codex_protocol::config_types::ReasoningSummary>,
@@ -535,13 +536,11 @@ impl AppServerSession {
         output_schema: Option<serde_json::Value>,
     ) -> Result<TurnStartResponse> {
         let request_id = self.next_request_id();
-        let sandbox_policy = if self.is_remote()
-            || matches!(sandbox_policy, SandboxPolicy::ExternalSandbox { .. })
-        {
-            Some(sandbox_policy.into())
-        } else {
-            None
-        };
+        let (sandbox_policy, permission_profile) = turn_start_permission_overrides(
+            self.thread_params_mode(),
+            &sandbox_policy,
+            permission_profile,
+        );
         self.client
             .request_typed(ClientRequest::TurnStart {
                 request_id,
@@ -557,7 +556,7 @@ impl AppServerSession {
                     // at thread start/resume/fork. Avoid sending a lossy
                     // legacy projection until user turns carry profiles.
                     sandbox_policy,
-                    permission_profile: None,
+                    permission_profile,
                     model: Some(model),
                     service_tier,
                     effort,
@@ -1064,6 +1063,23 @@ fn permission_profile_override_from_config(
     }
 }
 
+fn turn_start_permission_overrides(
+    thread_params_mode: ThreadParamsMode,
+    sandbox_policy: &SandboxPolicy,
+    permission_profile: Option<PermissionProfile>,
+) -> (
+    Option<codex_app_server_protocol::SandboxPolicy>,
+    Option<codex_app_server_protocol::PermissionProfile>,
+) {
+    if matches!(thread_params_mode, ThreadParamsMode::Remote)
+        || matches!(sandbox_policy, SandboxPolicy::ExternalSandbox { .. })
+    {
+        (Some(sandbox_policy.clone().into()), None)
+    } else {
+        (None, permission_profile.map(Into::into))
+    }
+}
+
 fn thread_start_params_from_config(
     config: &Config,
     thread_params_mode: ThreadParamsMode,
@@ -1430,6 +1446,52 @@ mod tests {
             Some(config.permissions.permission_profile().into())
         );
         assert_eq!(params.model_provider, Some(config.model_provider_id));
+    }
+
+    #[test]
+    fn embedded_turn_start_permission_overrides_send_runtime_profile_only_when_provided() {
+        let cwd = std::path::Path::new("/tmp/project");
+        let sandbox_policy = SandboxPolicy::DangerFullAccess;
+        let permission_profile =
+            PermissionProfile::from_legacy_sandbox_policy(&sandbox_policy, cwd);
+
+        assert_eq!(
+            turn_start_permission_overrides(
+                ThreadParamsMode::Embedded,
+                &sandbox_policy,
+                /*permission_profile*/ None,
+            ),
+            (None, None)
+        );
+
+        assert_eq!(
+            turn_start_permission_overrides(
+                ThreadParamsMode::Embedded,
+                &sandbox_policy,
+                Some(permission_profile.clone()),
+            ),
+            (None, Some(permission_profile.into()))
+        );
+    }
+
+    #[test]
+    fn remote_turn_start_permission_overrides_keep_legacy_sandbox_policy() {
+        let cwd = std::path::Path::new("/tmp/project");
+        let sandbox_policy = SandboxPolicy::DangerFullAccess;
+        let permission_profile =
+            PermissionProfile::from_legacy_sandbox_policy(&sandbox_policy, cwd);
+
+        assert_eq!(
+            turn_start_permission_overrides(
+                ThreadParamsMode::Remote,
+                &sandbox_policy,
+                Some(permission_profile),
+            ),
+            (
+                Some(codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
+                None
+            )
+        );
     }
 
     #[tokio::test]
