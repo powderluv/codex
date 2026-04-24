@@ -29,6 +29,8 @@ pub(super) enum RealtimeConversationPhase {
 pub(super) struct RealtimeConversationUiState {
     pub(super) phase: RealtimeConversationPhase,
     requested_close: bool,
+    push_to_talk_active: bool,
+    push_to_talk_release_pending: bool,
     session_id: Option<String>,
     transport: RealtimeConversationUiTransport,
     #[cfg(not(target_os = "linux"))]
@@ -198,6 +200,40 @@ impl ChatWidget {
         self.request_realtime_conversation_close(/*info_message*/ None);
     }
 
+    pub(crate) fn toggle_realtime_conversation_from_ui(&mut self) {
+        if self.realtime_conversation.is_live() {
+            self.stop_realtime_conversation_from_ui();
+            return;
+        }
+        if self.realtime_conversation_enabled() {
+            self.start_realtime_conversation();
+        }
+    }
+
+    pub(crate) fn start_realtime_push_to_talk_from_ui(&mut self) {
+        if self.realtime_conversation.is_live() || !self.realtime_conversation_enabled() {
+            return;
+        }
+
+        self.realtime_conversation.push_to_talk_active = true;
+        self.realtime_conversation.push_to_talk_release_pending = false;
+        self.start_realtime_conversation();
+    }
+
+    pub(crate) fn stop_realtime_push_to_talk_from_ui(&mut self) {
+        if !self.realtime_conversation.push_to_talk_active {
+            return;
+        }
+
+        self.realtime_conversation.push_to_talk_active = false;
+        if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {
+            self.realtime_conversation.push_to_talk_release_pending = true;
+            return;
+        }
+
+        self.stop_realtime_conversation_from_ui();
+    }
+
     #[cfg(not(target_os = "linux"))]
     pub(crate) fn stop_realtime_conversation_for_deleted_meter(&mut self, id: &str) -> bool {
         if self.realtime_conversation.is_live()
@@ -216,7 +252,7 @@ impl ChatWidget {
         self.realtime_conversation.requested_close = false;
         self.realtime_conversation.session_id = None;
         self.set_footer_hint_override(Some(Self::realtime_footer_hint_items()));
-        match self.config.realtime.transport {
+        match configured_realtime_transport(self.config.realtime.transport) {
             RealtimeTransport::Websocket => {
                 self.realtime_conversation.transport = RealtimeConversationUiTransport::Websocket;
                 self.submit_realtime_conversation_start(/*transport*/ None);
@@ -252,6 +288,9 @@ impl ChatWidget {
             }
             return;
         }
+        if self.realtime_conversation.requested_close {
+            return;
+        }
 
         self.realtime_conversation.requested_close = true;
         self.realtime_conversation.phase = RealtimeConversationPhase::Stopping;
@@ -273,6 +312,8 @@ impl ChatWidget {
         self.set_footer_hint_override(/*items*/ None);
         self.realtime_conversation.phase = RealtimeConversationPhase::Inactive;
         self.realtime_conversation.requested_close = false;
+        self.realtime_conversation.push_to_talk_active = false;
+        self.realtime_conversation.push_to_talk_release_pending = false;
         self.realtime_conversation.session_id = None;
         self.realtime_conversation.transport = RealtimeConversationUiTransport::Websocket;
     }
@@ -302,6 +343,11 @@ impl ChatWidget {
         } else {
             self.realtime_conversation.phase = RealtimeConversationPhase::Active;
             self.start_realtime_local_audio();
+        }
+        if self.realtime_conversation.push_to_talk_release_pending {
+            self.realtime_conversation.push_to_talk_release_pending = false;
+            self.request_realtime_conversation_close(/*info_message*/ None);
+            return;
         }
         self.request_redraw();
     }
@@ -620,6 +666,18 @@ impl ChatWidget {
             player.clear();
         }
     }
+}
+
+fn configured_realtime_transport(transport: RealtimeTransport) -> RealtimeTransport {
+    if matches!(transport, RealtimeTransport::WebRtc) && !realtime_webrtc_supported() {
+        RealtimeTransport::Websocket
+    } else {
+        transport
+    }
+}
+
+fn realtime_webrtc_supported() -> bool {
+    cfg!(target_os = "macos")
 }
 
 fn start_realtime_webrtc_offer_task(app_event_tx: AppEventSender) {

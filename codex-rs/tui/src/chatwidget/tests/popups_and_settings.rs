@@ -43,6 +43,84 @@ async fn deleted_realtime_meter_uses_shared_stop_path() {
 }
 
 #[tokio::test]
+async fn f12_push_to_talk_starts_on_press_and_stops_on_release() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::RealtimeConversation, true);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE));
+    next_realtime_start_op(&mut op_rx);
+    assert_eq!(
+        chat.realtime_conversation.phase,
+        RealtimeConversationPhase::Starting
+    );
+
+    chat.handle_key_event(KeyEvent::new_with_kind(
+        KeyCode::F(12),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    ));
+    assert!(op_rx.try_recv().is_err());
+    assert_eq!(
+        chat.realtime_conversation.phase,
+        RealtimeConversationPhase::Starting
+    );
+
+    chat.on_realtime_conversation_started(
+        codex_protocol::protocol::RealtimeConversationStartedEvent {
+            session_id: Some("session-1".to_string()),
+            version: codex_protocol::protocol::RealtimeConversationVersion::V2,
+        },
+    );
+    next_realtime_close_op(&mut op_rx);
+    assert_eq!(
+        chat.realtime_conversation.phase,
+        RealtimeConversationPhase::Stopping
+    );
+}
+
+#[tokio::test]
+async fn f12_release_does_not_stop_realtime_not_started_by_push_to_talk() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.realtime_conversation.phase = RealtimeConversationPhase::Active;
+
+    chat.handle_key_event(KeyEvent::new_with_kind(
+        KeyCode::F(12),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    ));
+    assert!(op_rx.try_recv().is_err());
+    assert_eq!(
+        chat.realtime_conversation.phase,
+        RealtimeConversationPhase::Active
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn realtime_webrtc_config_falls_back_to_websocket_on_unsupported_platforms() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.realtime.transport = codex_config::config_toml::RealtimeTransport::WebRtc;
+
+    chat.start_realtime_conversation();
+
+    loop {
+        match op_rx.try_recv() {
+            Ok(Op::RealtimeConversationStart(params)) => {
+                assert_eq!(params.transport, None);
+                return;
+            }
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) => {
+                panic!("expected realtime start op but queue was empty")
+            }
+            Err(TryRecvError::Disconnected) => {
+                panic!("expected realtime start op but channel closed")
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn experimental_mode_plan_is_ignored_on_startup() {
     let codex_home = tempdir().expect("tempdir");
     let cfg = ConfigBuilder::default()

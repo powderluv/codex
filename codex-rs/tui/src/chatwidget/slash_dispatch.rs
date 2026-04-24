@@ -180,14 +180,7 @@ impl ChatWidget {
                 self.set_service_tier_selection(next_tier);
             }
             SlashCommand::Realtime => {
-                if !self.realtime_conversation_enabled() {
-                    return;
-                }
-                if self.realtime_conversation.is_live() {
-                    self.stop_realtime_conversation_from_ui();
-                } else {
-                    self.start_realtime_conversation();
-                }
+                self.toggle_realtime_conversation_from_ui();
             }
             SlashCommand::Settings => {
                 if !self.realtime_audio_device_selection_enabled() {

@@ -352,6 +352,21 @@ pub(super) fn next_realtime_close_op(op_rx: &mut tokio::sync::mpsc::UnboundedRec
     }
 }
 
+pub(super) fn next_realtime_start_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
+    loop {
+        match op_rx.try_recv() {
+            Ok(Op::RealtimeConversationStart(_)) => return,
+            Ok(_) => continue,
+            Err(TryRecvError::Empty) => {
+                panic!("expected realtime start op but queue was empty")
+            }
+            Err(TryRecvError::Disconnected) => {
+                panic!("expected realtime start op but channel closed")
+            }
+        }
+    }
+}
+
 pub(super) fn assert_no_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
     while let Ok(op) = op_rx.try_recv() {
         assert!(

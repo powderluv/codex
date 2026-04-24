@@ -5412,6 +5412,24 @@ impl ChatWidget {
                 }
                 return;
             }
+            KeyEvent {
+                code: KeyCode::F(12),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                self.start_realtime_push_to_talk_from_ui();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::F(12),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Release,
+                ..
+            } => {
+                self.stop_realtime_push_to_talk_from_ui();
+                return;
+            }
             other if other.kind == KeyEventKind::Press => {
                 self.bottom_pane.clear_quit_shortcut_hint();
                 self.quit_shortcut_expires_at = None;
