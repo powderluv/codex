@@ -653,6 +653,7 @@ pub(crate) struct CodexMessageProcessorArgs {
     /// Startup config used as the process baseline. Fresh effective config loads
     /// go through `config_manager`.
     pub(crate) config: Arc<Config>,
+    pub(crate) thread_store_override: Option<Arc<dyn ThreadStore>>,
     pub(crate) config_manager: ConfigManager,
     pub(crate) feedback: CodexFeedback,
     pub(crate) log_db: Option<LogDbLayer>,
@@ -747,6 +748,7 @@ impl CodexMessageProcessor {
             analytics_events_client,
             arg0_paths,
             config,
+            thread_store_override,
             config_manager,
             feedback,
             log_db,
@@ -757,7 +759,7 @@ impl CodexMessageProcessor {
             outgoing: outgoing.clone(),
             analytics_events_client,
             arg0_paths,
-            thread_store: configured_thread_store(&config),
+            thread_store: thread_store_override.unwrap_or_else(|| configured_thread_store(&config)),
             config,
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
@@ -3949,25 +3951,30 @@ impl CodexMessageProcessor {
                 },
             )
             .await;
-        let (summaries, next_cursor) = match list_result {
+        let (stored_threads, next_cursor) = match list_result {
             Ok(r) => r,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
                 return;
             }
         };
-        let backwards_cursor = summaries.first().and_then(|summary| {
-            thread_backwards_cursor_for_sort_key(summary, store_sort_key, sort_direction)
+        let backwards_cursor = stored_threads.first().and_then(|thread| {
+            thread_backwards_cursor_for_sort_key(thread, store_sort_key, sort_direction)
         });
-        let mut threads = Vec::with_capacity(summaries.len());
-        let mut thread_ids = HashSet::with_capacity(summaries.len());
-        let mut status_ids = Vec::with_capacity(summaries.len());
+        let mut threads = Vec::with_capacity(stored_threads.len());
+        let mut thread_ids = HashSet::with_capacity(stored_threads.len());
+        let mut status_ids = Vec::with_capacity(stored_threads.len());
+        let fallback_provider = self.config.model_provider_id.clone();
 
-        for summary in summaries {
-            let conversation_id = summary.conversation_id;
+        for stored_thread in stored_threads {
+            let conversation_id = stored_thread.thread_id;
             thread_ids.insert(conversation_id);
 
-            let thread = summary_to_thread(summary, &self.config.cwd);
+            let (thread, _) = thread_from_stored_thread(
+                stored_thread,
+                fallback_provider.as_str(),
+                &self.config.cwd,
+            );
             status_ids.push(thread.id.clone());
             threads.push((conversation_id, thread));
         }
@@ -4094,7 +4101,7 @@ impl CodexMessageProcessor {
         thread_id: ThreadId,
         include_turns: bool,
     ) -> Result<Thread, ThreadReadViewError> {
-        let loaded_thread = self.load_live_thread_for_read(thread_id).await;
+        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
         let mut thread = if let Some(thread) = self
             .load_persisted_thread_for_read(thread_id, include_turns)
             .await?
@@ -4128,10 +4135,6 @@ impl CodexMessageProcessor {
             has_live_in_progress_turn,
         );
         Ok(thread)
-    }
-
-    async fn load_live_thread_for_read(&self, thread_id: ThreadId) -> Option<Arc<CodexThread>> {
-        self.thread_manager.get_thread(thread_id).await.ok()
     }
 
     async fn load_persisted_thread_for_read(
@@ -4259,95 +4262,37 @@ impl CodexMessageProcessor {
             }
         };
 
-        let state_db_ctx = get_state_db(&self.config).await;
-        let mut rollout_path = self
-            .resolve_rollout_path(thread_uuid, state_db_ctx.as_ref())
-            .await;
-        if rollout_path.is_none() {
-            rollout_path =
-                match find_thread_path_by_id_str(&self.config.codex_home, &thread_uuid.to_string())
-                    .await
-                {
-                    Ok(Some(path)) => Some(path),
-                    Ok(None) => match find_archived_thread_path_by_id_str(
-                        &self.config.codex_home,
-                        &thread_uuid.to_string(),
-                    )
-                    .await
-                    {
-                        Ok(path) => path,
-                        Err(err) => {
-                            self.send_invalid_request_error(
-                                request_id,
-                                format!("failed to locate archived thread id {thread_uuid}: {err}"),
-                            )
-                            .await;
-                            return;
-                        }
-                    },
-                    Err(err) => {
-                        self.send_invalid_request_error(
-                            request_id,
-                            format!("failed to locate thread id {thread_uuid}: {err}"),
-                        )
-                        .await;
-                        return;
-                    }
-                };
-        }
-
-        if rollout_path.is_none() {
-            match self.thread_manager.get_thread(thread_uuid).await {
-                Ok(thread) => {
-                    rollout_path = thread.rollout_path();
-                    if rollout_path.is_none() {
-                        self.send_invalid_request_error(
-                            request_id,
-                            "ephemeral threads do not support thread/turns/list".to_string(),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-                Err(_) => {
-                    self.send_invalid_request_error(
-                        request_id,
-                        format!("thread not loaded: {thread_uuid}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        }
-
-        let Some(rollout_path) = rollout_path.as_ref() else {
-            self.send_internal_error(
-                request_id,
-                format!("failed to locate rollout for thread {thread_uuid}"),
-            )
-            .await;
-            return;
-        };
-
-        match read_rollout_items_from_rollout(rollout_path).await {
+        match self.load_thread_turns_list_history(thread_uuid).await {
             Ok(items) => {
                 // This API optimizes network transfer by letting clients page through a
                 // thread's turns incrementally, but it still replays the entire rollout on
                 // every request. Rollback and compaction events can change earlier turns, so
                 // the server has to rebuild the full turn list until turn metadata is indexed
                 // separately.
-                let has_live_in_progress_turn =
-                    match self.thread_manager.get_thread(thread_uuid).await {
-                        Ok(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
-                        Err(_) => false,
-                    };
-                let turns = reconstruct_thread_turns_from_rollout_items(
+                let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
+                let has_live_in_progress_turn = match loaded_thread.as_ref() {
+                    Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
+                    None => false,
+                };
+                let mut turns = reconstruct_thread_turns_from_rollout_items(
                     &items,
                     self.thread_watch_manager
                         .loaded_status_for_thread(&thread_uuid.to_string())
                         .await,
                     has_live_in_progress_turn,
                 );
+                if has_live_in_progress_turn {
+                    // LiveThread owns persistence, but the in-flight turn is accumulated in
+                    // app-server's in-memory listener state until it is durably written.
+                    let thread_state = self.thread_state_manager.thread_state(thread_uuid).await;
+                    let active_turn = {
+                        let state = thread_state.lock().await;
+                        state.active_turn_snapshot()
+                    };
+                    if let Some(active_turn) = active_turn {
+                        merge_turn_history_with_active_turn(&mut turns, active_turn);
+                    }
+                }
                 let page = match paginate_thread_turns(
                     turns,
                     cursor.as_deref(),
@@ -4367,26 +4312,70 @@ impl CodexMessageProcessor {
                 };
                 self.outgoing.send_response(request_id, response).await;
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                self.send_invalid_request_error(
-                    request_id,
-                    format!(
-                        "thread {thread_uuid} is not materialized yet; thread/turns/list is unavailable before first user message"
-                    ),
-                )
-                .await;
+            Err(ThreadReadViewError::InvalidRequest(message)) => {
+                self.send_invalid_request_error(request_id, message).await;
             }
-            Err(err) => {
-                self.send_internal_error(
-                    request_id,
-                    format!(
-                        "failed to load rollout `{}` for thread {thread_uuid}: {err}",
-                        rollout_path.display()
-                    ),
-                )
-                .await;
+            Err(ThreadReadViewError::Internal(message)) => {
+                self.send_internal_error(request_id, message).await;
             }
         }
+    }
+
+    async fn load_thread_turns_list_history(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<RolloutItem>, ThreadReadViewError> {
+        match self
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: true,
+            })
+            .await
+        {
+            Ok(stored_thread) => {
+                let history = stored_thread.history.ok_or_else(|| {
+                    ThreadReadViewError::Internal(format!(
+                        "thread store did not return history for thread {thread_id}"
+                    ))
+                })?;
+                return Ok(history.items);
+            }
+            Err(ThreadStoreError::InvalidRequest { message })
+                if message == format!("no rollout found for thread id {thread_id}") => {}
+            Err(ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id,
+            }) if missing_thread_id == thread_id => {}
+            Err(ThreadStoreError::InvalidRequest { message }) => {
+                return Err(ThreadReadViewError::InvalidRequest(message));
+            }
+            Err(err) => {
+                return Err(ThreadReadViewError::Internal(format!(
+                    "failed to read thread: {err}"
+                )));
+            }
+        }
+
+        let thread = self
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|_| {
+                ThreadReadViewError::InvalidRequest(format!("thread not loaded: {thread_id}"))
+            })?;
+        let config_snapshot = thread.config_snapshot().await;
+        if config_snapshot.ephemeral {
+            return Err(ThreadReadViewError::InvalidRequest(
+                "ephemeral threads do not support thread/turns/list".to_string(),
+            ));
+        }
+
+        thread
+            .load_history(/*include_archived*/ true)
+            .await
+            .map(|history| history.items)
+            .map_err(|err| thread_turns_list_history_load_error(thread_id, err))
     }
 
     pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
@@ -4995,12 +4984,11 @@ impl CodexMessageProcessor {
         let (mut thread, history) =
             thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
         if include_turns && let Some(history) = history {
-            populate_thread_turns(
+            populate_thread_turns_from_history(
                 &mut thread,
-                ThreadTurnSource::HistoryItems(&history.items),
+                &history.items,
                 /*active_turn*/ None,
-            )
-            .await?;
+            )?;
         }
         Ok(thread)
     }
@@ -5091,12 +5079,11 @@ impl CodexMessageProcessor {
         thread.path = Some(rollout_path.to_path_buf());
         if include_turns {
             let history_items = thread_history.get_rollout_items();
-            populate_thread_turns(
+            populate_thread_turns_from_history(
                 &mut thread,
-                ThreadTurnSource::HistoryItems(&history_items),
+                &history_items,
                 /*active_turn*/ None,
-            )
-            .await?;
+            )?;
         }
         self.attach_thread_name(thread_id, &mut thread).await;
         Ok(thread)
@@ -5320,12 +5307,11 @@ impl CodexMessageProcessor {
             thread.preview = preview_from_rollout_items(&history_items);
             thread.forked_from_id = Some(source_thread_id.to_string());
             if include_turns
-                && let Err(message) = populate_thread_turns(
+                && let Err(message) = populate_thread_turns_from_history(
                     &mut thread,
-                    ThreadTurnSource::HistoryItems(&history_items),
+                    &history_items,
                     /*active_turn*/ None,
                 )
-                .await
             {
                 self.send_internal_error(request_id, message).await;
                 return;
@@ -5478,7 +5464,7 @@ impl CodexMessageProcessor {
         sort_key: StoreThreadSortKey,
         sort_direction: SortDirection,
         filters: ThreadListFilters,
-    ) -> Result<(Vec<ConversationSummary>, Option<String>), JSONRPCErrorError> {
+    ) -> Result<(Vec<StoredThread>, Option<String>), JSONRPCErrorError> {
         let ThreadListFilters {
             model_providers,
             source_kinds,
@@ -5503,7 +5489,6 @@ impl CodexMessageProcessor {
             }
             None => Some(vec![self.config.model_provider_id.clone()]),
         };
-        let fallback_provider = self.config.model_provider_id.clone();
         let (allowed_sources_vec, source_kind_filter) = compute_source_filters(source_kinds);
         let allowed_sources = allowed_sources_vec.as_slice();
         let store_sort_direction = match sort_direction {
@@ -5532,20 +5517,21 @@ impl CodexMessageProcessor {
 
             let mut filtered = Vec::with_capacity(page.items.len());
             for it in page.items {
-                let Some(summary) = summary_from_stored_thread(it, fallback_provider.as_str())
-                else {
-                    continue;
-                };
+                let source = with_thread_spawn_agent_metadata(
+                    it.source.clone(),
+                    it.agent_nickname.clone(),
+                    it.agent_role.clone(),
+                );
                 if source_kind_filter
                     .as_ref()
-                    .is_none_or(|filter| source_kind_matches(&summary.source, filter))
+                    .is_none_or(|filter| source_kind_matches(&source, filter))
                     && cwd_filters.as_ref().is_none_or(|expected_cwds| {
                         expected_cwds.iter().any(|expected_cwd| {
-                            path_utils::paths_match_after_normalization(&summary.cwd, expected_cwd)
+                            path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
                         })
                     })
                 {
-                    filtered.push(summary);
+                    filtered.push(it);
                     if filtered.len() >= remaining {
                         break;
                     }
@@ -8793,12 +8779,11 @@ async fn handle_pending_thread_resume_request(
     let connection_id = request_id.connection_id;
     let mut thread = pending.thread_summary;
     if pending.include_turns
-        && let Err(message) = populate_thread_turns(
+        && let Err(message) = populate_thread_turns_from_history(
             &mut thread,
-            ThreadTurnSource::HistoryItems(&pending.history_items),
+            &pending.history_items,
             active_turn.as_ref(),
         )
-        .await
     {
         outgoing
             .send_error(
@@ -8909,18 +8894,12 @@ async fn handle_pending_thread_resume_request(
         .await;
 }
 
-enum ThreadTurnSource<'a> {
-    HistoryItems(&'a [RolloutItem]),
-}
-
-async fn populate_thread_turns(
+fn populate_thread_turns_from_history(
     thread: &mut Thread,
-    turn_source: ThreadTurnSource<'_>,
+    items: &[RolloutItem],
     active_turn: Option<&Turn>,
 ) -> std::result::Result<(), String> {
-    let mut turns = match turn_source {
-        ThreadTurnSource::HistoryItems(items) => build_turns_from_rollout_items(items),
-    };
+    let mut turns = build_turns_from_rollout_items(items);
     if let Some(active_turn) = active_turn {
         merge_turn_history_with_active_turn(&mut turns, active_turn.clone());
     }
@@ -9452,6 +9431,27 @@ fn thread_store_resume_read_error(err: ThreadStoreError) -> JSONRPCErrorError {
             message: format!("failed to read thread: {err}"),
             data: None,
         },
+    }
+}
+
+fn thread_turns_list_history_load_error(
+    thread_id: ThreadId,
+    err: ThreadStoreError,
+) -> ThreadReadViewError {
+    match err {
+        ThreadStoreError::InvalidRequest { message }
+            if message.starts_with("failed to resolve rollout path `") =>
+        {
+            ThreadReadViewError::InvalidRequest(format!(
+                "thread {thread_id} is not materialized yet; thread/turns/list is unavailable before first user message"
+            ))
+        }
+        ThreadStoreError::InvalidRequest { message } => {
+            ThreadReadViewError::InvalidRequest(message)
+        }
+        err => ThreadReadViewError::Internal(format!(
+            "failed to load thread history for thread {thread_id}: {err}"
+        )),
     }
 }
 
@@ -10075,18 +10075,14 @@ pub(crate) fn summary_to_thread(
 }
 
 fn thread_backwards_cursor_for_sort_key(
-    summary: &ConversationSummary,
+    thread: &StoredThread,
     sort_key: StoreThreadSortKey,
     sort_direction: SortDirection,
 ) -> Option<String> {
     let timestamp = match sort_key {
-        StoreThreadSortKey::CreatedAt => summary.timestamp.as_deref(),
-        StoreThreadSortKey::UpdatedAt => summary
-            .updated_at
-            .as_deref()
-            .or(summary.timestamp.as_deref()),
+        StoreThreadSortKey::CreatedAt => thread.created_at,
+        StoreThreadSortKey::UpdatedAt => thread.updated_at,
     };
-    let timestamp = parse_datetime(timestamp)?;
     // The state DB stores unique millisecond timestamps. Offset the reverse cursor by one
     // millisecond so the opposite-direction query includes the page anchor.
     let timestamp = match sort_direction {

@@ -86,6 +86,7 @@ use codex_feedback::CodexFeedback;
 use codex_login::AuthManager;
 use codex_protocol::protocol::SessionSource;
 pub use codex_state::log_db::LogDbLayer;
+use codex_thread_store::ThreadStore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -125,6 +126,8 @@ pub struct InProcessStartArgs {
     pub feedback: CodexFeedback,
     /// SQLite tracing layer used to flush recently emitted logs before feedback upload.
     pub log_db: Option<LogDbLayer>,
+    /// Optional storage override for embedders/tests that provide thread history out of process.
+    pub thread_store_override: Option<Arc<dyn ThreadStore>>,
     /// Environment manager used by core execution and filesystem operations.
     pub environment_manager: Arc<EnvironmentManager>,
     /// Startup warnings emitted after initialize succeeds.
@@ -410,6 +413,7 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
                 environment_manager: args.environment_manager,
                 feedback: args.feedback,
                 log_db: args.log_db,
+                thread_store_override: args.thread_store_override,
                 config_warnings: args.config_warnings,
                 session_source: args.session_source,
                 auth_manager,
@@ -750,6 +754,7 @@ mod tests {
             thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
             feedback: CodexFeedback::new(),
             log_db: None,
+            thread_store_override: None,
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             config_warnings: Vec::new(),
             session_source,

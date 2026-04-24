@@ -5,6 +5,13 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::rollout_path;
 use app_test_support::test_absolute_path;
 use app_test_support::to_response;
+use async_trait::async_trait;
+use codex_app_server::in_process;
+use codex_app_server::in_process::InProcessStartArgs;
+use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
+use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
@@ -31,15 +38,38 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_arg0::Arg0DispatchPaths;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
+use codex_core::config::ConfigBuilder;
+use codex_core::config_loader::CloudRequirementsLoader;
+use codex_core::config_loader::LoaderOverrides;
+use codex_exec_server::EnvironmentManager;
+use codex_feedback::CodexFeedback;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
+use codex_thread_store::AppendThreadItemsParams;
+use codex_thread_store::ArchiveThreadParams;
+use codex_thread_store::CreateThreadParams;
+use codex_thread_store::ListThreadsParams;
+use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::ReadThreadByRolloutPathParams;
+use codex_thread_store::ReadThreadParams as StoreReadThreadParams;
+use codex_thread_store::ResumeThreadParams;
+use codex_thread_store::StoredThread;
+use codex_thread_store::StoredThreadHistory;
+use codex_thread_store::ThreadPage;
+use codex_thread_store::ThreadStore;
+use codex_thread_store::ThreadStoreError;
+use codex_thread_store::ThreadStoreResult;
+use codex_thread_store::UpdateThreadMetadataParams;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::any::Any;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -243,6 +273,139 @@ async fn thread_turns_list_can_page_backward_and_forward() -> Result<()> {
     let ThreadTurnsListResponse { data, .. } = to_response::<ThreadTurnsListResponse>(read_resp)?;
     assert_eq!(turn_user_texts(&data), vec!["third", "fourth"]);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let thread_id = codex_protocol::ThreadId::from_string("00000000-0000-4000-8000-000000000123")?;
+    let store: Arc<dyn ThreadStore> = Arc::new(FakeHistoryThreadStore::new(thread_id));
+    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(loader_overrides.clone())
+        .build()
+        .await?;
+    let client = in_process::start(InProcessStartArgs {
+        arg0_paths: Arg0DispatchPaths::default(),
+        config: Arc::new(config),
+        cli_overrides: Vec::new(),
+        loader_overrides,
+        cloud_requirements: CloudRequirementsLoader::default(),
+        thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
+        feedback: CodexFeedback::new(),
+        log_db: None,
+        thread_store_override: Some(store),
+        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        config_warnings: Vec::new(),
+        session_source: SessionSource::Cli.into(),
+        enable_codex_api_key_env: false,
+        initialize: InitializeParams {
+            client_info: ClientInfo {
+                name: "codex-app-server-tests".to_string(),
+                title: None,
+                version: "0.1.0".to_string(),
+            },
+            capabilities: Some(InitializeCapabilities {
+                experimental_api: true,
+                ..Default::default()
+            }),
+        },
+        channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await?;
+
+    let result = client
+        .request(ClientRequest::ThreadTurnsList {
+            request_id: RequestId::Integer(1),
+            params: ThreadTurnsListParams {
+                thread_id: thread_id.to_string(),
+                cursor: None,
+                limit: Some(10),
+                sort_direction: Some(SortDirection::Asc),
+            },
+        })
+        .await?
+        .expect("thread/turns/list should succeed");
+    let ThreadTurnsListResponse { data, .. } = serde_json::from_value(result)?;
+
+    assert_eq!(turn_user_texts(&data), vec!["history from store"]);
+
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let thread_id = codex_protocol::ThreadId::from_string("00000000-0000-4000-8000-000000000124")?;
+    let store: Arc<dyn ThreadStore> = Arc::new(FakeHistoryThreadStore::new(thread_id));
+    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(loader_overrides.clone())
+        .build()
+        .await?;
+    let client = in_process::start(InProcessStartArgs {
+        arg0_paths: Arg0DispatchPaths::default(),
+        config: Arc::new(config),
+        cli_overrides: Vec::new(),
+        loader_overrides,
+        cloud_requirements: CloudRequirementsLoader::default(),
+        thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
+        feedback: CodexFeedback::new(),
+        log_db: None,
+        thread_store_override: Some(store),
+        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        config_warnings: Vec::new(),
+        session_source: SessionSource::Cli.into(),
+        enable_codex_api_key_env: false,
+        initialize: InitializeParams {
+            client_info: ClientInfo {
+                name: "codex-app-server-tests".to_string(),
+                title: None,
+                version: "0.1.0".to_string(),
+            },
+            capabilities: Some(InitializeCapabilities {
+                experimental_api: true,
+                ..Default::default()
+            }),
+        },
+        channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await?;
+
+    let result = client
+        .request(ClientRequest::ThreadList {
+            request_id: RequestId::Integer(1),
+            params: ThreadListParams {
+                cursor: None,
+                limit: Some(10),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: Some(Vec::new()),
+                source_kinds: None,
+                archived: None,
+                cwd: None,
+                use_state_db_only: false,
+                search_term: None,
+            },
+        })
+        .await?
+        .expect("thread/list should succeed");
+    let ThreadListResponse { data, .. } = serde_json::from_value(result)?;
+
+    assert_eq!(data.len(), 1);
+    let thread = &data[0];
+    assert_eq!(thread.id, thread_id.to_string());
+    assert_eq!(thread.path, None);
+    assert_eq!(thread.preview, "history from store");
+    assert_eq!(thread.name.as_deref(), Some("named pathless thread"));
+
+    client.shutdown().await?;
     Ok(())
 }
 
@@ -671,6 +834,59 @@ async fn thread_read_include_turns_rejects_unmaterialized_loaded_thread() -> Res
 }
 
 #[tokio::test]
+async fn thread_turns_list_rejects_unmaterialized_loaded_thread() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+    let thread_path = thread.path.clone().expect("thread path");
+    assert!(
+        !thread_path.exists(),
+        "fresh thread rollout should not be materialized yet"
+    );
+
+    let read_id = mcp
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: thread.id,
+            cursor: None,
+            limit: None,
+            sort_direction: None,
+        })
+        .await?;
+    let read_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+
+    assert!(
+        read_err
+            .error
+            .message
+            .contains("thread/turns/list is unavailable before first user message"),
+        "unexpected error: {}",
+        read_err.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Result<()> {
     let server = responses::start_mock_server().await;
     let _response_mock = responses::mount_sse_once(
@@ -785,6 +1001,162 @@ fn turn_user_texts(turns: &[codex_app_server_protocol::Turn]) -> Vec<&str> {
             _ => None,
         })
         .collect()
+}
+
+struct FakeHistoryThreadStore {
+    thread: StoredThread,
+}
+
+impl FakeHistoryThreadStore {
+    fn new(thread_id: codex_protocol::ThreadId) -> Self {
+        let history = StoredThreadHistory {
+            thread_id,
+            items: vec![codex_protocol::protocol::RolloutItem::EventMsg(
+                codex_protocol::protocol::EventMsg::UserMessage(
+                    codex_protocol::protocol::UserMessageEvent {
+                        message: "history from store".to_string(),
+                        images: None,
+                        local_images: Vec::new(),
+                        text_elements: Vec::new(),
+                    },
+                ),
+            )],
+        };
+        let now = chrono::Utc::now();
+        Self {
+            thread: StoredThread {
+                thread_id,
+                rollout_path: None,
+                forked_from_id: None,
+                preview: "history from store".to_string(),
+                name: Some("named pathless thread".to_string()),
+                model_provider: "mock_provider".to_string(),
+                model: None,
+                reasoning_effort: None,
+                created_at: now,
+                updated_at: now,
+                archived_at: None,
+                cwd: Path::new("/").to_path_buf(),
+                cli_version: "0.0.0".to_string(),
+                source: codex_protocol::protocol::SessionSource::Cli,
+                agent_nickname: None,
+                agent_role: None,
+                agent_path: None,
+                git_info: None,
+                approval_mode: codex_protocol::protocol::AskForApproval::OnRequest,
+                sandbox_policy: codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
+                token_usage: None,
+                first_user_message: Some("history from store".to_string()),
+                history: Some(history),
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl ThreadStore for FakeHistoryThreadStore {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn create_thread(&self, _params: CreateThreadParams) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("create_thread"))
+    }
+
+    async fn resume_thread(&self, _params: ResumeThreadParams) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("resume_thread"))
+    }
+
+    async fn append_items(&self, _params: AppendThreadItemsParams) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("append_items"))
+    }
+
+    async fn persist_thread(&self, _thread_id: codex_protocol::ThreadId) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("persist_thread"))
+    }
+
+    async fn flush_thread(&self, _thread_id: codex_protocol::ThreadId) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("flush_thread"))
+    }
+
+    async fn shutdown_thread(&self, _thread_id: codex_protocol::ThreadId) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("shutdown_thread"))
+    }
+
+    async fn discard_thread(&self, _thread_id: codex_protocol::ThreadId) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("discard_thread"))
+    }
+
+    async fn load_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreResult<StoredThreadHistory> {
+        if params.thread_id != self.thread.thread_id {
+            return Err(ThreadStoreError::ThreadNotFound {
+                thread_id: params.thread_id,
+            });
+        }
+        assert!(params.include_archived);
+        self.thread
+            .history
+            .clone()
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: "fake thread store history is missing".to_string(),
+            })
+    }
+
+    async fn read_thread(&self, params: StoreReadThreadParams) -> ThreadStoreResult<StoredThread> {
+        if params.thread_id != self.thread.thread_id {
+            return Err(ThreadStoreError::ThreadNotFound {
+                thread_id: params.thread_id,
+            });
+        }
+        assert!(params.include_archived);
+        assert!(params.include_history);
+        Ok(self.thread.clone())
+    }
+
+    async fn read_thread_by_rollout_path(
+        &self,
+        _params: ReadThreadByRolloutPathParams,
+    ) -> ThreadStoreResult<StoredThread> {
+        Err(unimplemented_thread_store_method(
+            "read_thread_by_rollout_path",
+        ))
+    }
+
+    async fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreResult<ThreadPage> {
+        assert!(params.page_size > 0);
+        assert!(!params.archived);
+        Ok(ThreadPage {
+            items: vec![self.thread.clone()],
+            next_cursor: None,
+        })
+    }
+
+    async fn update_thread_metadata(
+        &self,
+        _params: UpdateThreadMetadataParams,
+    ) -> ThreadStoreResult<StoredThread> {
+        Err(unimplemented_thread_store_method("update_thread_metadata"))
+    }
+
+    async fn archive_thread(&self, _params: ArchiveThreadParams) -> ThreadStoreResult<()> {
+        Err(unimplemented_thread_store_method("archive_thread"))
+    }
+
+    async fn unarchive_thread(
+        &self,
+        _params: ArchiveThreadParams,
+    ) -> ThreadStoreResult<StoredThread> {
+        Err(unimplemented_thread_store_method("unarchive_thread"))
+    }
+}
+
+fn unimplemented_thread_store_method(method: &str) -> ThreadStoreError {
+    ThreadStoreError::Internal {
+        message: format!("fake thread store does not implement {method}"),
+    }
 }
 
 // Helper to create a config.toml pointing at the mock model server.

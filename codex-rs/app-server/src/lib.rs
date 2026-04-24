@@ -678,6 +678,7 @@ pub async fn run_main_with_transport(
             environment_manager,
             feedback: feedback.clone(),
             log_db,
+            thread_store_override: None,
             config_warnings,
             session_source,
             auth_manager,

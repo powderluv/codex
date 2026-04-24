@@ -87,6 +87,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_state::log_db::LogDbLayer;
+use codex_thread_store::ThreadStore;
 use futures::FutureExt;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
@@ -255,6 +256,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) feedback: CodexFeedback,
     pub(crate) log_db: Option<LogDbLayer>,
+    pub(crate) thread_store_override: Option<Arc<dyn ThreadStore>>,
     pub(crate) config_warnings: Vec<ConfigWarningNotification>,
     pub(crate) session_source: SessionSource,
     pub(crate) auth_manager: Arc<AuthManager>,
@@ -274,6 +276,7 @@ impl MessageProcessor {
             environment_manager,
             feedback,
             log_db,
+            thread_store_override,
             config_warnings,
             session_source,
             auth_manager,
@@ -311,6 +314,7 @@ impl MessageProcessor {
             analytics_events_client: analytics_events_client.clone(),
             arg0_paths,
             config: Arc::clone(&config),
+            thread_store_override,
             config_manager: config_manager.clone(),
             feedback,
             log_db,

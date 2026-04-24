@@ -283,6 +283,7 @@ fn build_test_processor(
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         feedback: CodexFeedback::new(),
         log_db: None,
+        thread_store_override: None,
         config_warnings: Vec::new(),
         session_source: SessionSource::VSCode,
         auth_manager,

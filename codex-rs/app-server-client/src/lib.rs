@@ -400,6 +400,7 @@ impl InProcessClientStartArgs {
             thread_config_loader,
             feedback: self.feedback,
             log_db: self.log_db,
+            thread_store_override: None,
             environment_manager: self.environment_manager,
             config_warnings: self.config_warnings,
             session_source: self.session_source,
